@@ -1,179 +1,248 @@
-use io::BufReader;
 use permutohedron::Heap;
+use std::fmt::Debug;
 use std::fs;
 use std::io;
-use std::io::BufRead;
 
-fn parse_instruction(instruction: isize) -> (isize, isize, isize, isize) {
-    let opcode = instruction % 100;
-    let mode_1 = instruction % 1000 / 100;
-    let mode_2 = instruction % 10000 / 1000;
-    let mode_3 = instruction % 100000 / 10000;
-    (opcode, mode_1, mode_2, mode_3)
+#[derive(Debug)]
+enum IntcodeOperation {
+    Add,
+    Multiply,
+    Input,
+    Output,
+    JumpIfTrue,
+    JumpIfFalse,
+    LessThan,
+    Equal,
+    Halt,
 }
 
-fn get_arg_val(intcode_slice: &mut [isize], arg: isize, mode: isize) -> isize {
-    match mode {
-        0 => {
-            if (arg as usize) < intcode_slice.len() {
-                return intcode_slice[arg as usize];
+impl IntcodeOperation {
+    pub fn from_num(num: isize) -> IntcodeOperation {
+        match num {
+            1 => IntcodeOperation::Add,
+            2 => IntcodeOperation::Multiply,
+            3 => IntcodeOperation::Input,
+            4 => IntcodeOperation::Output,
+            5 => IntcodeOperation::JumpIfTrue,
+            6 => IntcodeOperation::JumpIfFalse,
+            7 => IntcodeOperation::LessThan,
+            8 => IntcodeOperation::Equal,
+            99 => IntcodeOperation::Halt,
+            _ => IntcodeOperation::Halt, // TODO: Not sure if this is valid?
+        }
+    }
+}
+
+enum IntcodeMode {
+    Position,
+    Immediate,
+}
+
+impl IntcodeMode {
+    pub fn from_num(num: isize) -> IntcodeMode {
+        match num {
+            0 => IntcodeMode::Position,
+            1 => IntcodeMode::Immediate,
+            n => {
+                panic!("Invalid number {} supplied", n);
             }
-            0
         }
-        1 => arg,
-        _ => 0,
     }
 }
 
-fn handle_instruction(
-    intcode_slice: &mut [isize],
-    input_reader: &mut BufReader<&[u8]>,
-    output_values: &mut Vec<isize>,
-    index: usize,
-    opcode: isize,
-    mode_1: isize,
-    mode_2: isize,
-    mode_3: isize,
-) -> (bool, isize, isize, usize) {
-    let arg1 = intcode_slice[index + 1];
-    let arg2 = intcode_slice[index + 2];
-    let arg3 = if index + 3 < intcode_slice.len() {
-        intcode_slice[index + 3]
-    } else {
-        0
-    };
-    let arg1_val = get_arg_val(intcode_slice, arg1, mode_1);
-    let arg2_val = get_arg_val(intcode_slice, arg2, mode_2);
+struct IntcodeInstruction {
+    pub operation: IntcodeOperation,
+    pub mode_1: IntcodeMode,
+    pub mode_2: IntcodeMode,
+    pub mode_3: IntcodeMode,
+}
 
-    match opcode {
-        1 => (true, arg3, arg1_val + arg2_val, index + 4),
-        2 => (true, arg3, arg1_val * arg2_val, index + 4),
-        3 => {
-            let mut input = String::new();
-            input_reader
-                .read_line(&mut input)
-                .expect("error: unable to read input");
-            let input_str = input.trim();
-            let input_val = if input_str != "" {
-                input_str.parse::<isize>().unwrap_or(0)
-            } else {
-                output_values.pop().unwrap_or(0)
-            };
-            (true, arg1, input_val, index + 2)
+impl IntcodeInstruction {
+    pub fn new(
+        operation: IntcodeOperation,
+        mode_1: IntcodeMode,
+        mode_2: IntcodeMode,
+        mode_3: IntcodeMode,
+    ) -> IntcodeInstruction {
+        IntcodeInstruction {
+            operation,
+            mode_1,
+            mode_2,
+            mode_3,
         }
-        4 => {
-            output_values.push(arg1_val);
-            (false, 0, 0, index + 2)
-        }
-        5 => {
-            let place = if arg1_val != 0 {
-                arg2_val as usize
-            } else {
-                index + 3
-            };
-            (false, 0, 0, place)
-        }
-        6 => {
-            let place = if arg1_val == 0 {
-                arg2_val as usize
-            } else {
-                index + 3
-            };
-            (false, 0, 0, place)
-        }
-        7 => (true, arg3, (arg1_val < arg2_val) as isize, index + 4),
-        8 => (true, arg3, (arg1_val == arg2_val) as isize, index + 4),
-        _ => (false, 0, 0, index + 1),
+    }
+
+    pub fn from_num(num: isize) -> IntcodeInstruction {
+        // println!("{:?}", num);
+        IntcodeInstruction::new(
+            IntcodeOperation::from_num(num % 100),
+            IntcodeMode::from_num(num % 1000 / 100),
+            IntcodeMode::from_num(num % 10000 / 1000),
+            IntcodeMode::from_num(num % 100000 / 10000),
+        )
     }
 }
 
-fn process_intcodes(
-    intcode_slice: &mut [isize],
-    output_values: &mut Vec<isize>,
-    inputs: Vec<isize>,
-    start_idx: usize,
-    part_2: bool,
-) -> (isize, isize, usize) {
-    let mut n = start_idx.clone();
-    let input_str = inputs
-        .into_iter()
-        .map(|i| i.to_string())
-        .collect::<Vec<String>>()
-        .join("\n");
-    let mut input_reader: BufReader<_> = BufReader::new(input_str.as_bytes());
+struct IntcodeComputer<'a> {
+    intcodes: &'a mut [isize],
+    // TODO: Might need to refactor
+    pub inputs: Vec<isize>,
+    pub outputs: Vec<isize>,
+    pub index: usize,
+    pause_on_output: bool,
+}
 
-    while n < intcode_slice.len() {
-        let (opcode, m_1, m_2, m_3) = parse_instruction(intcode_slice[n]);
-        match opcode {
-            (1..=8) => {
-                let (is_op, idx, val, place) = handle_instruction(
-                    intcode_slice,
-                    &mut input_reader,
-                    output_values,
-                    n,
-                    opcode,
-                    m_1,
-                    m_2,
-                    m_3,
-                );
-                if is_op {
-                    intcode_slice[idx as usize] = val;
-                } else if opcode == 4 {
-                    return (intcode_slice[0], *output_values.last().unwrap_or(&0), place);
+impl<'a> IntcodeComputer<'a> {
+    pub fn new(
+        intcodes: &'a mut [isize],
+        inputs: Vec<isize>,
+        pause_on_output: bool,
+    ) -> IntcodeComputer<'a> {
+        IntcodeComputer {
+            intcodes,
+            inputs,
+            outputs: Vec::new(),
+            index: 0,
+            pause_on_output,
+        }
+    }
+
+    pub fn run(&mut self) -> IntcodeOperation {
+        loop {
+            let instruction = IntcodeInstruction::from_num(self.intcodes[self.index]);
+            match instruction.operation {
+                IntcodeOperation::Output => {
+                    self.handle_instruction(instruction);
+                    if self.pause_on_output {
+                        return IntcodeOperation::Output;
+                    }
                 }
-                n = place;
+                IntcodeOperation::Halt => {
+                    return IntcodeOperation::Halt;
+                }
+                _ => {
+                    self.handle_instruction(instruction);
+                }
             }
-            99 => {
-                return (-99, *output_values.last().unwrap_or(&0), n);
-            }
-            n => break,
         }
     }
-    (intcode_slice[0], *output_values.last().unwrap_or(&0), n)
+
+    fn get_arg_value(&mut self, arg: isize, mode: IntcodeMode) -> isize {
+        match mode {
+            IntcodeMode::Position => {
+                if (arg as usize) < self.intcodes.len() {
+                    return self.intcodes[arg as usize];
+                }
+                0
+            }
+            IntcodeMode::Immediate => arg,
+        }
+    }
+
+    fn handle_instruction(&mut self, instruction: IntcodeInstruction) {
+        let arg_1 = *self.intcodes.get(self.index + 1).unwrap_or(&0);
+        let arg_2 = *self.intcodes.get(self.index + 2).unwrap_or(&0);
+        let arg_3 = *self.intcodes.get(self.index + 3).unwrap_or(&0);
+        let arg_1_val = self.get_arg_value(arg_1, instruction.mode_1);
+        let arg_2_val = self.get_arg_value(arg_2, instruction.mode_2);
+        let arg_3_val = self.get_arg_value(arg_3, instruction.mode_3);
+
+        // println!("Index: {}", self.index);
+        // println!("Op: {:?}", instruction.operation);
+        // println!("Inputs: {:?}", self.inputs);
+        // println!("Outputs: {:?}", self.outputs);
+        // println!("Vec: {:?}", self.intcodes);
+        match instruction.operation {
+            IntcodeOperation::Add => {
+                self.intcodes[arg_3 as usize] = arg_1_val + arg_2_val;
+                self.index += 4;
+            }
+            IntcodeOperation::Multiply => {
+                self.intcodes[arg_3 as usize] = arg_1_val * arg_2_val;
+                self.index += 4;
+            }
+            IntcodeOperation::Input => {
+                self.intcodes[arg_1 as usize] = if self.inputs.len() > 0 {
+                    *self
+                        .inputs
+                        .drain(..1)
+                        .collect::<Vec<isize>>()
+                        .first()
+                        .unwrap()
+                } else {
+                    self.outputs.pop().unwrap_or(0)
+                };
+                self.index += 2;
+            }
+            IntcodeOperation::Output => {
+                self.outputs.push(arg_1_val);
+                self.index += 2;
+            }
+            IntcodeOperation::JumpIfTrue => {
+                self.index = match arg_1_val {
+                    0 => self.index + 3,
+                    _ => arg_2_val as usize,
+                };
+            }
+            IntcodeOperation::JumpIfFalse => {
+                self.index = match arg_1_val {
+                    0 => arg_2_val as usize,
+                    _ => self.index + 3,
+                };
+            }
+            IntcodeOperation::LessThan => {
+                self.intcodes[arg_3 as usize] = (arg_1_val < arg_2_val) as isize;
+                self.index += 4;
+            }
+            IntcodeOperation::Equal => {
+                self.intcodes[arg_3 as usize] = (arg_1_val == arg_2_val) as isize;
+                self.index += 4;
+            }
+            IntcodeOperation::Halt => {}
+        }
+    }
 }
 
 fn process_combination(intcode_slice: &mut [isize], inputs: Vec<isize>) -> isize {
     let mut last_output = 0;
+    let mut computer = IntcodeComputer::new(intcode_slice, Vec::new(), true);
     for input in inputs {
-        let mut output_values: Vec<isize> = Vec::new();
-        let output = process_intcodes(
-            intcode_slice,
-            &mut output_values,
-            vec![input, last_output],
-            0,
-            false,
-        );
-        last_output = output.1;
+        let mut input_vec = vec![input, last_output];
+        computer.index = 0;
+        computer.inputs = input_vec;
+        computer.run();
+        last_output = *computer.outputs.last().unwrap_or(&0);
     }
     last_output
 }
 
 fn process_combination_2(intcode_slice: Vec<isize>, inputs: Vec<isize>) -> isize {
     let mut last_output = 0;
-    let mut idx = 0;
+    let mut output_values: Vec<isize> = vec![];
     let mut amp_vecs: Vec<Vec<isize>> = (0..5).map(|_| intcode_slice.clone()).collect();
     let mut amp_slices: Vec<&mut [isize]> = amp_vecs.iter_mut().map(|v| v.as_mut_slice()).collect();
-    let mut output_values: Vec<isize> = Vec::new();
-    let mut amp_idxs: &mut [usize] = &mut [0, 0, 0, 0, 0];
+    let mut amp_computers: Vec<IntcodeComputer> = amp_slices
+        .iter_mut()
+        .map(|s| IntcodeComputer::new(*s, vec![], true))
+        .collect();
 
+    let mut idx = 0;
     loop {
         let input_vec = if idx < inputs.len() {
             vec![inputs[idx], last_output]
         } else {
             vec![]
         };
-        let (output_num, output_val, amp_idx) = process_intcodes(
-            &mut amp_slices[idx % 5],
-            &mut output_values,
-            input_vec,
-            amp_idxs[idx % 5],
-            true,
-        );
-        if output_num == -99 {
-            break;
+
+        let mut computer = &mut amp_computers[idx % 5];
+        computer.inputs = input_vec;
+        computer.outputs = output_values;
+        match computer.run() {
+            IntcodeOperation::Halt => break,
+            _ => {}
         }
-        amp_idxs[idx % 5] = amp_idx;
-        last_output = output_val;
+        output_values = computer.outputs.clone();
+        last_output = *computer.outputs.last().unwrap_or(&0);
         idx += 1;
     }
     last_output
